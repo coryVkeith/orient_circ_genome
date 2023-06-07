@@ -1,0 +1,303 @@
+#!/bin/sh
+### This code takes a list of sorted taxa sample ID, contig number, and hits to taxa in GenBank RefSeq generated from the search_taxa.sh script.
+
+OUT_DIR="/xdisk/uschuch/corykeith/ViCAT_P003/out"
+NCBI_REF="/xdisk/uschuch/corykeith/BLAST/NCBI_virus/viraldb_1line.fsa"
+mauve="/xdisk/uschuch/corykeith/tools/mauve_snapshot_2015-02-13/linux-x64/progressiveMauve"
+
+##Change for each taxa run
+sorted_taxa_list="sortedalphalist.txt"
+taxa_dir="alphas"
+
+##Write common directory for oriented taxa sequences
+if [[ -d "${OUT_DIR}/oriented_${taxa_dir}/" ]]; then
+    rm -rf "${OUT_DIR}/oriented_${taxa_dir}/"
+fi
+mkdir ${OUT_DIR}/oriented_${taxa_dir}
+mkdir ${OUT_DIR}/oriented_${taxa_dir}/full-length ${OUT_DIR}/oriented_${taxa_dir}/possible_recs ${OUT_DIR}/oriented_${taxa_dir}/partials
+
+##Write and check directory structure for individual sample mauve outputs.
+while IFS=$'\t' read -r -a myArray; do
+SMPLE="${myArray[0]%_filtered_scaffolds.fasta}"
+    if [[ -d "${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/" ]]; then
+        rm -rf ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/
+    fi
+done < $sorted_taxa_list 
+
+while IFS=$'\t' read -r -a myArray; do
+     #Variables for each contig in list.
+     SMPLE="${myArray[0]%_filtered_scaffolds.fasta}"
+     NODE_NAME="${myArray[1]%_length*}"
+     NODE="${myArray[1]}"
+     ACCESSION="${myArray[2]}"
+     
+     ##Informative sample info
+     suff="${SMPLE#*146201_*}"
+     pre="${suff%_i5*}"
+###
+###ATTENTION: This needs to be pulled out of the while loop. The directory should only be written once, this will allow multiple RefSeqs to be written in the same dir.
+###     
+     ## Make directory for mauve in $OUT_DIR
+     if [[ -d "${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/$NODE_NAME/" ]];then
+         echo "$NODE_NAME directory exists, multiple taxa hits"
+     else
+         mkdir -p ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/$NODE_NAME
+     fi
+
+     ## Pull accession number from viraldb_1line.fsa
+     grep -A 1 $ACCESSION $NCBI_REF > ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/${ACCESSION}.fasta
+    
+done < $sorted_taxa_list
+
+while IFS=$'\t' read -r -a myArray; do
+     #Variables for each contig in list.
+     SMPLE="${myArray[0]%_filtered_scaffolds.fasta}"
+     NODE_NAME="${myArray[1]%_length*}"
+     NODE="${myArray[1]}"
+     ACCESSION="${myArray[2]}"
+
+     ##Informative sample info
+     suff="${SMPLE#*146201_*}"
+     pre="${suff%_i5*}" 
+     #Variables for gather_contigs.py
+     FILE="${OUT_DIR}/${SMPLE}/spades_filtered/${myArray[0]}"
+     echo $NODE > contig.txt
+     CONTIG="contig.txt"
+     OUT="${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/${pre}_${NODE_NAME}.fasta"
+     #echo $OUT out $FILE file $CONTIG contig > ${OUT_DIR}/${SMPLE}/mauve/out_name.txt
+     if [[ -f "$OUT" ]]; then
+         echo "Contig already written."
+     else
+         python gather_contigs.py $FILE $CONTIG $OUT
+     fi
+     
+     ## Counting number of references in folder
+     REF_COUNT=0
+     for f in ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/NC_*.fasta
+         do REF_COUNT=$(( REF_COUNT + 1 ))
+         echo $f >> ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/REF_NAMES.txt
+     done
+     CONTIG_NUM=$(( REF_COUNT + 1 ))
+     
+     ## Building References Array for mauve with multiple references.
+     REFS=()
+
+     while IFS= read -r current_line; do
+         REFS+=("$current_line")
+     done < ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/REF_NAMES.txt
+     
+     ## Conditional mauve on number of references for alignment.
+     MAUVEOUT="${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/${NODE_NAME}"
+     CONTIGS="$OUT"
+     if [ "$REF_COUNT" -eq 1 ] && [ -f "${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/mauve_begin.txt" ]; then
+          $mauve --output ${MAUVEOUT}.xmfa ${REFS[0]} $CONTIGS
+     elif [ "$REF_COUNT" -eq 2 ] && [ -f "${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/mauve_begin.txt" ]; then
+          echo "$mauve --output ${MAUVEOUT}.xmfa ${REFS[0]} ${REFS[1]} $CONTIGS" >>  ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/test_out.txt
+          $mauve --output ${MAUVEOUT}.xmfa ${REFS[0]} ${REFS[1]} $CONTIGS
+     elif [ "$REF_COUNT" -eq 3 ] && [ -f "${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/mauve_begin.txt" ]; then
+          $mauve --output ${MAUVEOUT}.xmfa ${REFS[0]} ${REFS[1]} ${REFS[2]} $CONTIGS
+     else
+         echo "More than 3 blast hits to ${taxa_dir}. Check ${pre}_${NODE_NAME}" >> /xdisk/uschuch/corykeith/ViCAT_P003/out/interestingContigs.txt
+     fi
+     touch ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/mauve_begin.txt 
+     ## Grabs lines of xmfa to get local collinear blocks (LCBs) coordinates
+     GREP_STRING="> ${CONTIG_NUM}:*"
+     grep "$GREP_STRING" ${MAUVEOUT}.xmfa >> ${MAUVEOUT}_LCB.txt
+     ## Extract LCBs
+     count=0
+     while IFS=$' ' read -r -a myArray; do
+         if [[ ${myArray[0]} == ">" ]]; then
+         count=$(( count + 1 ))
+         #echo ${myArray[1]}
+         STRIP="${myArray[1]#*:}"
+         #echo $STRIP strip
+         FIRST="${STRIP%-*}"
+         SECOND="${STRIP#*-}"
+         ## extract LCBs from contigs
+         samtools faidx $CONTIGS $NODE:$FIRST-$SECOND >> ${MAUVEOUT}_LCB_${count}.fasta
+         fi
+     done < ${MAUVEOUT}_LCB.txt
+     ## Combine all blocks to multiline fasta
+     cat ${MAUVEOUT}_LCB_* > ${MAUVEOUT}_combined.fasta
+     
+     #minimap variables and  minimap mapping of LCBs     
+     SAM1="${MAUVEOUT}_1.sam"
+     BAM1="${MAUVEOUT}_1"
+     SAM2="${MAUVEOUT}_2.sam"
+     BAM2="${MAUVEOUT}_2"
+     SAM3="${MAUVEOUT}_3.sam"
+     BAM3="${MAUVEOUT}_3"
+     
+     #### MAY DELETE
+     # Combine refs for alignment
+     #cat ${REFS[0]} ${REFS[1]} >> ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/REF.fasta
+     #REF="${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/REF.fasta"
+
+     MINIMAP="/xdisk/uschuch/corykeith/ORIENTATION/minimap2/minimap2"
+
+     
+     $MINIMAP -k 10 -w 5 -B 0 -ado ${REFS[0]} ${MAUVEOUT}_combined.fasta > $SAM1
+     # Convert sam to bam
+     samtools view -S -b $SAM1 > ${BAM1}.bam
+     # Sort the alignment
+     samtools sort ${BAM1}.bam -o ${BAM1}_sorted.bam
+     # Get consensus fastq file
+     samtools mpileup -B -uf ${REFS[0]} ${BAM1}_sorted.bam | bcftools call -c | vcfutils.pl vcf2fq > ${BAM1}_tmp_consensus.fastq
+     #change header to name of contig instead of reference
+     seq_ref1=$(basename "${REFS[0]}")
+     seq_ref1=${seq_ref1%.fasta}
+     SEQ_DESC1="${pre}_${NODE_NAME}_$seq_ref1"
+     echo $SEQ_DESC1 $seq_ref1 >> ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/seq_desc.txt
+     cat ${BAM1}_tmp_consensus.fastq | seqkit replace -p $seq_ref1 -r $SEQ_DESC1 > ${BAM1}_consensus.fastq
+ #    rm ${BAM1}_tmp_consensus.fastq
+     # Convert .fastq to .fasta
+     seqtk seq -a ${BAM1}_consensus.fastq > ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/${pre}_${NODE_NAME}_${seq_ref1}_oriented.fasta
+     
+     if [ -f "${REFS[1]}" ]; then
+     $MINIMAP -k 10 -w 5 -B 0 -ado ${REFS[1]} ${MAUVEOUT}_combined.fasta > $SAM2
+     # Convert sam to bam
+     samtools view -S -b $SAM2 > ${BAM2}.bam
+     # Sort the alignment
+     samtools sort ${BAM2}.bam -o ${BAM2}_sorted.bam
+     # Get consensus fastq file
+     samtools mpileup -B -uf ${REFS[1]} ${BAM2}_sorted.bam | bcftools call -c | vcfutils.pl vcf2fq > ${BAM2}_tmp_consensus.fastq
+     #change header to name of contig instead of reference
+     seq_ref2=$(basename "${REFS[1]}")
+     seq_ref2=${seq_ref2%.fasta}
+     SEQ_DESC2="${pre}_${NODE_NAME}_$seq_ref2"
+     echo $SEQ_DESC2 $seq_ref2 >> ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/seq_desc.txt
+     cat ${BAM2}_tmp_consensus.fastq | seqkit replace -p $seq_ref2 -r $SEQ_DESC2 > ${BAM2}_consensus.fastq
+#     rm ${BAM2}_tmp_consensus.fastq
+     # Convert .fastq to .fasta
+     seqtk seq -a ${BAM2}_consensus.fastq > ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/${pre}_${NODE_NAME}_${seq_ref2}_oriented.fasta
+     fi
+
+     REFSEQ1_LEN=$(tail -n +2 "${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/${pre}_${NODE_NAME}_${seq_ref1}_oriented.fasta" | wc -c)
+     REFSEQ2_LEN=$(tail -n +2 "${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/${pre}_${NODE_NAME}_${seq_ref2}_oriented.fasta" | wc -c)
+     REFSEQ1_NCOUNT=$(sed -n '2p' "${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/${pre}_${NODE_NAME}_${seq_ref1}_oriented.fasta")
+     REFSEQ2_NCOUNT=$(sed -n '2p' "${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/${pre}_${NODE_NAME}_${seq_ref2}_oriented.fasta")
+     echo "REFSEQ1:$REFSEQ1_LEN REFSEQ2: $REFSEQ2_LEN" >> ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/seq_len.txt
+
+     if [ "$REFSEQ1_LEN" -gt "$REFSEQ2_LEN" ] && ! echo "$REFSEQ1_NCOUNT" | grep -qE 'n{30,}'; then
+         length1=$(tail -n +2 "${REFS[0]}" | wc -c)
+         length2=$(tail -n +2 "${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/${pre}_${NODE_NAME}_${seq_ref1}_oriented.fasta" | wc -c)
+         length3=$(tail -n +2 "$OUT" | wc -c)
+         echo "LEN1:$length1, LEN2:$length2, LEN3:$length3 for ${seq_ref1}" >> ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/count_lengths.txt
+         #Calculate difference in lengths
+         DIFF=$((length1 - length2))
+         DIFF2=$((length2 - length3))
+         #Absolute difference
+         ABS_DIFF=${DIFF#-} #Absolute difference between Reference and Oriented genome.
+         ABS_DIFF2=${DIFF2#-} #Absolute difference between Oriented genome and de novo contig.
+         echo "ABS_DIFF:$ABS_DIFF ABS_DIFF2:$ABS_DIFF2 for REF0:${REFS[0]}" >> ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/abs_diff.txt
+         #Threshold for matching lengths
+         REC_THRESH=150
+         FULL_THRESH=50
+         #Count consecutive "n"s in fasta
+         N_COUNT=$(sed -n '2p' "${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/${pre}_${NODE_NAME}_${seq_ref1}_oriented.fasta")
+
+         touch ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/copy_1stpass.txt
+         1stpass="${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/copy_1stpass.txt"
+
+         #Check lengths and consecutive n counts and writes files to respective folders
+         if [ -f $1stpass ] && [ $ABS_DIFF -le $FULL_THRESH ] && ! echo "$N_COUNT" | grep -qE 'n{30,}'; then
+             cp ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/${pre}_${NODE_NAME}_${seq_ref1}_oriented.fasta ${OUT_DIR}/oriented_${taxa_dir}/full-length
+         elif [ -f $1stpass ] && [ $ABS_DIFF2 -ge $REC_THRESH ] && ! echo "$N_COUNT" | grep -qE 'n{30,}'; then
+             cp ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/${pre}_${NODE_NAME}_${seq_ref1}_oriented.fasta ${OUT_DIR}/oriented_${taxa_dir}/possible_recs
+    #     elif ! [ $ABS_DIFF2 -le $THRESH ] && ! [[ $N_COUNT =~ n{30,} ]]; then
+    #         cp ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/${pre}_${NODE_NAME}_${seq_ref1}_oriented.fasta ${OUT_DIR}/oriented_${taxa_dir}/possible_recs    
+         else
+             cp ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/${pre}_${NODE_NAME}_${seq_ref1}_oriented.fasta ${OUT_DIR}/oriented_${taxa_dir}/partials
+         fi
+     elif [ "$REFSEQ2_LEN" -gt "$REFSEQ1_LEN" ] && ! echo "$REFSEQ2_NCOUNT" | grep -qE 'n{30,}'; then
+         length1=$(tail -n +2 "${REFS[1]}" | wc -c)
+         length2=$(tail -n +2 "${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/${pre}_${NODE_NAME}_${seq_ref2}_oriented.fasta" | wc -c)
+         length3=$(tail -n +2 "$OUT" | wc -c)
+         echo "LEN1:$length1, LEN2:$length2, LEN3:$length3 for ${seq_ref2}" >> ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/count_lengths.txt
+         #Calculate difference in lengths
+         DIFF=$((length1 - length2))
+         DIFF2=$((length2 - length3))
+         #Absolute difference
+         ABS_DIFF=${DIFF#-} #Absolute difference between Reference and Oriented genome.
+         ABS_DIFF2=${DIFF2#-} #Absolute difference between Oriented genome and de novo contig.
+         echo "ABS_DIFF:$ABS_DIFF ABS_DIFF2:$ABS_DIFF2 for REF1:${REFS[1]}" >> ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/abs_diff.txt
+         #Threshold for matching lengths
+         REC_THRESH=150
+         FULL_THRESH=50
+         #Count consecutive "n"s in fasta
+         N_COUNT=$(sed -n '2p' "${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/${pre}_${NODE_NAME}_${seq_ref2}_oriented.fasta")
+
+         touch ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/copy_1stpass.txt
+         1stpass="${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/copy_1stpass.txt"
+
+
+         #Check lengths and consecutive n counts and writes files to respective folders
+         if [ -f $1stpass ] && [ $ABS_DIFF -le $FULL_THRESH ] && ! echo "$N_COUNT" | grep -qE 'n{30,}'; then
+             cp ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/${pre}_${NODE_NAME}_${seq_ref2}_oriented.fasta ${OUT_DIR}/oriented_${taxa_dir}/full-length
+         elif [ -f $1stpass ] && [ $ABS_DIFF2 -ge $REC_THRESH ] && ! echo "$N_COUNT" | grep -qE 'n{30,}'; then
+             cp ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/${pre}_${NODE_NAME}_${seq_ref2}_oriented.fasta ${OUT_DIR}/oriented_${taxa_dir}/possible_recs
+    #     elif ! [ $ABS_DIFF2 -le $THRESH ] && ! [[ $N_COUNT =~ n{30,} ]]; then
+    #         cp ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/${pre}_${NODE_NAME}_${seq_ref2}_oriented.fasta ${OUT_DIR}/oriented_${taxa_dir}/possible_recs    
+         else
+             cp ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/${pre}_${NODE_NAME}_${seq_ref2}_oriented.fasta ${OUT_DIR}/oriented_${taxa_dir}/partials
+         fi
+     else
+         length1=$(tail -n +2 "${REFS[0]}" | wc -c)
+         length2=$(tail -n +2 "${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/${pre}_${NODE_NAME}_${seq_ref1}_oriented.fasta" | wc -c)
+         length3=$(tail -n +2 "$OUT" | wc -c)
+         echo "LEN1:$length1, LEN2:$length2, LEN3:$length3 for else" >> ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/count_lengths.txt
+         #Calculate difference in lengths
+         DIFF=$((length1 - length2))
+         DIFF2=$((length2 - length3))
+         #Absolute difference
+         ABS_DIFF=${DIFF#-} #Absolute difference between Reference and Oriented genome.
+         ABS_DIFF2=${DIFF2#-} #Absolute difference between Oriented genome and de novo contig.
+         echo "ABS_DIFF:$ABS_DIFF ABS_DIFF2:$ABS_DIFF2 for else" >> ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/abs_diff.txt
+         #Threshold for matching lengths
+         REC_THRESH=150
+         FULL_THRESH=50
+         #Count consecutive "n"s in fasta
+         N_COUNT=$(sed -n '2p' "${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/${pre}_${NODE_NAME}_${seq_ref1}_oriented.fasta")
+
+         touch ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/copy_1stpass.txt
+         1stpass="${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/copy_1stpass.txt"
+
+         #Check lengths and consecutive n counts and writes files to respective folders
+         if [ -f $1stpass ] && [ $ABS_DIFF -le $FULL_THRESH ] && ! echo "$N_COUNT" | grep -qE 'n{30,}'; then
+             cp ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/${pre}_${NODE_NAME}_${seq_ref1}_oriented.fasta ${OUT_DIR}/oriented_${taxa_dir}/full-length
+         elif [ -f $1stpass ] && [ $ABS_DIFF2 -ge $REC_THRESH ] && ! echo "$N_COUNT" | grep -qE 'n{30,}'; then
+             cp ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/${pre}_${NODE_NAME}_${seq_ref1}_oriented.fasta ${OUT_DIR}/oriented_${taxa_dir}/possible_recs
+         #elif [ $ABS_DIFF -le $FULL_THRESH ] && ! [[ $N_COUNT =~ n{30,} ]]; then
+         #    cp ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/${pre}_${NODE_NAME}_${seq_ref1}_oriented.fasta ${OUT_DIR}/oriented_${taxa_dir}/full-length
+    #     elif [ -f "$1stpass" ] && ! [ $ABS_DIFF2 -le $THRESH ] && ! [[ $N_COUNT =~ n{30,} ]]; then
+    #         cp ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/${pre}_${NODE_NAME}_${seq_ref1}_oriented.fasta ${OUT_DIR}/oriented_${taxa_dir}/possible_recs    
+         else
+             cp ${OUT_DIR}/${SMPLE}/mauve/${taxa_dir}/${NODE_NAME}/${pre}_${NODE_NAME}_${seq_ref1}_oriented.fasta ${OUT_DIR}/oriented_${taxa_dir}/partials
+         fi
+     fi 
+done < $sorted_taxa_list
+
+## Delete the empty fasta files.
+for f in ${OUT_DIR}/oriented_${taxa_dir}/full-length/*.fasta
+    do
+    if [[ $(cat "$f") == ">" ]]; then
+        # Delete the file
+        rm "$f"
+    fi
+done
+
+for f in ${OUT_DIR}/oriented_${taxa_dir}/partials/*.fasta
+    do
+    if [[ $(cat "$f") == ">" ]]; then
+        # Delete the file
+        rm "$f"
+    fi
+done
+
+for f in ${OUT_DIR}/oriented_${taxa_dir}/possible_recs/*.fasta
+    do
+    if [[ $(cat "$f") == ">" ]]; then
+        # Delete the file
+        rm "$f"
+    fi
+done
